@@ -82,6 +82,12 @@ class Connector(threading.Thread):
         # connection to the main address
         self.main_conn = None
 
+        # The data base to do reads from
+        self.read_database = kwargs.pop('read_database', None)
+
+        # Connection to the database we are reading from
+        self.read_conn = None
+
         # List of DocManager instances
         if doc_managers:
             self.doc_managers = doc_managers
@@ -181,6 +187,7 @@ class Connector(threading.Thread):
             auth_key = password
         connector = Connector(
             mongo_address=config['mainAddress'],
+            read_database=config['readDatabase'],
             doc_managers=config['docManagers'],
             oplog_checkpoint=os.path.abspath(config['oplogFile']),
             collection_dump=(not config['noDump']),
@@ -290,12 +297,18 @@ class Connector(threading.Thread):
                     (name, util.long_to_bson_ts(timestamp))
                     for name, timestamp in data)
 
-    def create_authed_client(self, address=None, **kwargs):
+    def create_authed_client(self, address=None, username='', password='', database='', **kwargs):
         kwargs.update(self.ssl_kwargs)
         if address is None:
             address = self.address
         client = MongoClient(address, tz_aware=self.tz_aware, **kwargs)
-        if self.auth_key is not None:
+
+        # In case the address does not have database credential or name
+        if len(username) > 0 and len(password) > 0 and len(database) > 0:
+            client[database].authenticate(username, password)
+
+        # When the client has the auth info there is no need to set
+        if self.auth_key is not None and len(client._MongoClient__all_credentials) <= 0:
             client['admin'].authenticate(self.auth_username, self.auth_key)
         return client
 
@@ -304,6 +317,9 @@ class Connector(threading.Thread):
         """Discovers the mongo cluster and creates a thread for each primary.
         """
         self.main_conn = self.create_authed_client()
+        self.read_conn = self.create_authed_client(username=self.read_database['username'],
+                                                   password=self.read_database['password'],
+                                                   database=self.read_database['name'])
         LOG.always('Source MongoDB version: %s',
                    self.main_conn.admin.command('buildInfo')['version'])
 
@@ -340,10 +356,15 @@ class Connector(threading.Thread):
             self.main_conn = self.create_authed_client(
                 replicaSet=is_master['setName'])
 
+            self.read_conn.close()
+            self.read_conn = self.create_authed_client(username=self.read_database['username'],
+                                                       password=self.read_database['password'],
+                                                       database=self.read_database['name'], replicaSet=is_master['setName'])
+
             # non sharded configuration
             oplog = OplogThread(
                 self.main_conn, self.doc_managers, self.oplog_progress,
-                self.namespace_config, **self.kwargs)
+                self.namespace_config, read_client=self.read_conn, **self.kwargs)
             self.shard_set[0] = oplog
             LOG.info('MongoConnector: Starting connection thread %s' %
                      self.main_conn)
@@ -442,6 +463,27 @@ def get_config_options():
         " primary. For example, `-m localhost:27217`"
         " would be a valid argument to `-m`. Don't use"
         " quotes around the address.")
+
+
+
+    read_database_default = {
+        'name': '',
+        'username': '',
+        'password': ''
+    }
+
+
+    read_database = add_option(
+        config_key="readDatabase",
+        default=read_database_default,
+        type=dict)
+
+    # -v enables a separate read database
+    read_database.add_cli(
+            "--rdb", "--read-database",
+            dest="read_database", help="Enable a read database")
+
+
 
     oplog_file = add_option(
         config_key="oplogFile",

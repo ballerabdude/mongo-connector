@@ -27,6 +27,13 @@
         "__passwordFile": "mongo-connector.pwd"
     },
 
+    "readDatabase": {
+        "__name": "dbname",
+        "__username": "user",
+        "__password": "password",
+        "__address": "localhost:27018"
+    },
+
     "__comment__": "For more information about SSL with MongoDB, please see http://docs.mongodb.org/manual/tutorial/configure-ssl-clients/",
     "__ssl": {
         "__sslCertfile": "Path to certificate to identify the local connection against MongoDB",

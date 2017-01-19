@@ -83,7 +83,7 @@ class OplogThread(threading.Thread):
     """
     def __init__(self, primary_client, doc_managers,
                  oplog_progress_dict, namespace_config,
-                 mongos_client=None, **kwargs):
+                 mongos_client=None, read_client=None, **kwargs):
         super(OplogThread, self).__init__()
 
         self.batch_size = kwargs.get('batch_size', DEFAULT_BATCH_SIZE)
@@ -93,6 +93,13 @@ class OplogThread(threading.Thread):
 
         # The connection to the mongos, if there is one.
         self.mongos_client = mongos_client
+
+        # The read client if available
+        self.read_client = read_client
+
+        if self.read_client is not None:
+            # Get the database name from the connection
+            self.read_client_db_name = list(self.read_client._MongoClient__all_credentials.keys())[0]
 
         # Are we allowed to perform a collection dump?
         self.collection_dump = kwargs.get('collection_dump', True)
@@ -483,7 +490,13 @@ class OplogThread(threading.Thread):
     def get_collection(self, namespace):
         """Get a pymongo collection from a namespace."""
         database, coll = namespace.split('.', 1)
-        return self.primary_client[database][coll]
+
+        # Return the database that we need
+        if self.read_client is not None:
+            return self.read_client[database][coll]
+        else:
+            return self.primary_client[database][coll]
+
 
     def dump_collection(self):
         """Dumps collection into the target system.
@@ -503,12 +516,24 @@ class OplogThread(threading.Thread):
         def get_all_ns():
             ns_set = []
             gridfs_ns_set = []
-            db_list = retry_until_ok(self.primary_client.database_names)
+
+            if self.read_client is None:
+                db_list = retry_until_ok(self.primary_client.database_names)
+            else:
+                db_list = [self.read_client_db_name]
+
             for database in db_list:
                 if database == "config" or database == "local":
                     continue
-                coll_list = retry_until_ok(
-                    self.primary_client[database].collection_names)
+
+
+                if self.read_client is not None:
+                    coll_list = retry_until_ok(
+                            self.read_client[self.read_client_db_name].collection_names)
+                else:
+                    coll_list = retry_until_ok(
+                            self.primary_client[database].collection_names)
+
                 for coll in coll_list:
                     # ignore system collections
                     if coll.startswith("system."):
@@ -522,6 +547,7 @@ class OplogThread(threading.Thread):
                         if self.namespace_config.gridfs_namespace(namespace):
                             gridfs_ns_set.append(namespace)
                     else:
+
                         namespace = "%s.%s" % (database, coll)
                         if self.namespace_config.map_namespace(namespace):
                             ns_set.append(namespace)
@@ -897,8 +923,8 @@ class OplogThread(threading.Thread):
                 obj_id = bson.objectid.ObjectId
                 bson_obj_id_list = [obj_id(doc['_id']) for doc in doc_list]
 
-                # Use connection to whole cluster if in sharded environment.
-                client = self.mongos_client or self.primary_client
+                # Use connection to whole cluster if in sharded environment or use the read database or main connection.
+                client = self.read_client or self.mongos_client or self.primary_client
                 to_update = util.retry_until_ok(
                     client[database][coll].find,
                     {'_id': {'$in': bson_obj_id_list}},
